@@ -10,22 +10,30 @@ import {
   IP_ADDRESS_PATTERN,
 } from "../../../common/string/is_ip_address";
 import type { LocalizeFunc } from "../../../common/translations/localize";
+import type { HASSDomEvent } from "../../../common/dom/fire_event";
 import "../../../components/ha-alert";
 import "../../../components/ha-button";
 import "../../../components/ha-card";
+import "../../../components/ha-file-upload";
 import "../../../components/ha-form/ha-form";
 import type { HaForm } from "../../../components/ha-form/ha-form";
 import type { SchemaUnion } from "../../../components/ha-form/types";
 import {
+  fetchHttpCaCertificate,
   fetchHttpConfig,
+  generateHttpCertificate,
   HTTP_CONFIG_FIELDS,
   saveHttpConfig,
   SSL_PROFILES,
+  uploadHttpCertificate,
 } from "../../../data/http";
 import type {
   ActiveConfigType,
+  CertificateInfo,
+  HttpCertificates,
   HttpConfig,
   HttpConfigWithMeta,
+  HttpProxyState,
 } from "../../../data/http";
 import {
   showAlertDialog,
@@ -33,13 +41,30 @@ import {
 } from "../../../dialogs/generic/show-dialog-box";
 import { haStyle } from "../../../resources/styles";
 import type { HomeAssistant } from "../../../types";
+import { fileDownload } from "../../../util/file_download";
 
 // Core uses -1 as the login attempts threshold to mean "never ban". The form
 // exposes that as a separate toggle instead of asking users to type -1.
 const UNLIMITED_LOGIN_ATTEMPTS = -1;
 
+// How the form presents the certificate selection: "none" is plain HTTP,
+// which core stores as no certificate source and no certificate path.
+type CertificateMode = "none" | "files" | "uploaded" | "generated";
+
+const certificateModeOf = (config: HttpConfig): CertificateMode => {
+  if (config.certificate === "uploaded" || config.certificate === "generated") {
+    return config.certificate;
+  }
+  return config.ssl_certificate ? "files" : "none";
+};
+
 const SCHEMA = memoizeOne(
-  (localize: LocalizeFunc, unlimitedLoginAttempts: boolean) =>
+  (
+    localize: LocalizeFunc,
+    unlimitedLoginAttempts: boolean,
+    proxyAvailable: boolean,
+    certificateMode: CertificateMode
+  ) =>
     [
       {
         name: "server_port",
@@ -62,17 +87,57 @@ const SCHEMA = memoizeOne(
         title: localize("ui.panel.config.network.http.sections.ssl"),
         schema: [
           {
-            name: "ssl_certificate",
-            selector: { text: {} },
+            name: "certificate_mode",
+            required: true,
+            selector: {
+              select: {
+                mode: "dropdown",
+                options: (
+                  ["none", "files", "uploaded", "generated"] as const
+                ).map((mode) => ({
+                  value: mode,
+                  label: localize(
+                    `ui.panel.config.network.http.certificate_mode.${mode}`
+                  ),
+                })),
+              },
+            },
           },
-          {
-            name: "ssl_key",
-            selector: { text: {} },
-          },
-          {
-            name: "ssl_peer_certificate",
-            selector: { text: {} },
-          },
+          ...(proxyAvailable && certificateMode !== "none"
+            ? ([
+                {
+                  name: "https_port",
+                  required: true,
+                  selector: {
+                    number: {
+                      min: 1,
+                      max: 65535,
+                      mode: "box",
+                      validation_message: localize(
+                        "ui.panel.config.network.http.invalid_port"
+                      ),
+                    },
+                  },
+                },
+              ] as const)
+            : []),
+          ...(certificateMode === "files"
+            ? ([
+                {
+                  name: "ssl_certificate",
+                  required: true,
+                  selector: { text: {} },
+                },
+                {
+                  name: "ssl_key",
+                  selector: { text: {} },
+                },
+                {
+                  name: "ssl_peer_certificate",
+                  selector: { text: {} },
+                },
+              ] as const)
+            : []),
           {
             name: "ssl_profile",
             selector: {
@@ -207,6 +272,18 @@ class HaConfigHttpForm extends LitElement {
   // A pending config that was reverted/failed and kept only for display.
   @state() private _revertedPending?: HttpConfigWithMeta;
 
+  @state() private _proxy?: HttpProxyState;
+
+  @state() private _certificates?: HttpCertificates;
+
+  @state() private _certificateBusy = false;
+
+  @state() private _certificateMessage?: string;
+
+  private _uploadCertificateFile?: File;
+
+  private _uploadKeyFile?: File;
+
   // Last explicit threshold, restored when the unlimited toggle is turned off.
   private _lastLoginAttemptsThreshold?: number;
 
@@ -237,9 +314,12 @@ class HaConfigHttpForm extends LitElement {
     }
 
     const formData = this._config ? this._formData(this._config) : undefined;
+    const certificateMode = formData?.certificate_mode ?? "none";
     const schema = SCHEMA(
       this.hass.localize,
-      !!formData?.login_attempts_unlimited
+      !!formData?.login_attempts_unlimited,
+      !!this._proxy?.available,
+      certificateMode
     );
 
     const portChanged =
@@ -321,6 +401,21 @@ class HaConfigHttpForm extends LitElement {
               : nothing
           }
           ${
+            this._proxy?.available
+              ? html`
+                  <ha-alert
+                    alert-type=${this._proxy.active ? "info" : "warning"}
+                  >
+                    ${this.hass.localize(
+                      this._proxy.active
+                        ? "ui.panel.config.network.http.proxy.active"
+                        : "ui.panel.config.network.http.proxy.unavailable"
+                    )}
+                  </ha-alert>
+                `
+              : nothing
+          }
+          ${
             this._error
               ? html`<ha-alert alert-type="error">${this._error}</ha-alert>`
               : nothing
@@ -349,6 +444,7 @@ class HaConfigHttpForm extends LitElement {
                     .computeHelper=${this._computeHelper}
                     @value-changed=${this._valueChanged}
                   ></ha-form>
+                  ${this._renderCertificate(certificateMode)}
                 `
               : nothing
           }
@@ -372,6 +468,219 @@ class HaConfigHttpForm extends LitElement {
     `;
   }
 
+  private _renderCertificate(mode: CertificateMode) {
+    if (mode !== "uploaded" && mode !== "generated") {
+      return nothing;
+    }
+    const info = this._certificates?.[mode] ?? null;
+    return html`
+      <div class="certificate">
+        ${
+          this._certificateMessage
+            ? html`<ha-alert alert-type="success"
+                >${this._certificateMessage}</ha-alert
+              >`
+            : nothing
+        }
+        <p>
+          ${
+            info
+              ? this.hass.localize(
+                  "ui.panel.config.network.http.certificate.info",
+                  {
+                    subject: info.subject,
+                    names: info.subject_alt_names.join(", "),
+                    expires: new Date(info.not_valid_after).toLocaleDateString(
+                      this.hass.locale.language
+                    ),
+                  }
+                )
+              : this.hass.localize(
+                  `ui.panel.config.network.http.certificate.${mode}_none`
+                )
+          }
+        </p>
+        ${
+          mode === "uploaded"
+            ? html`
+                <ha-file-upload
+                  .label=${this.hass.localize(
+                    "ui.panel.config.network.http.certificate.upload_certificate"
+                  )}
+                  .supports=${this.hass.localize(
+                    "ui.panel.config.network.http.certificate.pem_only"
+                  )}
+                  accept=".pem,.crt,.cer"
+                  .disabled=${this._certificateBusy}
+                  @file-picked=${this._certificateFilePicked}
+                  @files-cleared=${this._certificateFilesCleared}
+                ></ha-file-upload>
+                <ha-file-upload
+                  .label=${this.hass.localize(
+                    "ui.panel.config.network.http.certificate.upload_key"
+                  )}
+                  .supports=${this.hass.localize(
+                    "ui.panel.config.network.http.certificate.pem_only"
+                  )}
+                  accept=".pem,.key"
+                  .disabled=${this._certificateBusy}
+                  @file-picked=${this._keyFilePicked}
+                  @files-cleared=${this._keyFilesCleared}
+                ></ha-file-upload>
+                <div class="certificate-actions">
+                  <ha-button
+                    appearance="plain"
+                    @click=${this._uploadCertificate}
+                    .disabled=${this._certificateBusy}
+                    .loading=${this._certificateBusy}
+                  >
+                    ${this.hass.localize(
+                      "ui.panel.config.network.http.certificate.upload"
+                    )}
+                  </ha-button>
+                </div>
+              `
+            : html`
+                <p class="description">
+                  ${this.hass.localize(
+                    "ui.panel.config.network.http.certificate.generated_help"
+                  )}
+                </p>
+                <div class="certificate-actions">
+                  <ha-button
+                    appearance="plain"
+                    @click=${this._generateCertificate}
+                    .disabled=${this._certificateBusy}
+                    .loading=${this._certificateBusy}
+                  >
+                    ${this.hass.localize(
+                      info
+                        ? "ui.panel.config.network.http.certificate.regenerate"
+                        : "ui.panel.config.network.http.certificate.generate"
+                    )}
+                  </ha-button>
+                  ${
+                    info
+                      ? html`
+                          <ha-button
+                            appearance="plain"
+                            @click=${this._downloadCa}
+                            .disabled=${this._certificateBusy}
+                          >
+                            ${this.hass.localize(
+                              "ui.panel.config.network.http.certificate.download_ca"
+                            )}
+                          </ha-button>
+                        `
+                      : nothing
+                  }
+                </div>
+              `
+        }
+      </div>
+    `;
+  }
+
+  private _certificateFilePicked(ev: HASSDomEvent<{ files: File[] }>) {
+    this._uploadCertificateFile = ev.detail.files[0];
+  }
+
+  private _certificateFilesCleared() {
+    this._uploadCertificateFile = undefined;
+  }
+
+  private _keyFilePicked(ev: HASSDomEvent<{ files: File[] }>) {
+    this._uploadKeyFile = ev.detail.files[0];
+  }
+
+  private _keyFilesCleared() {
+    this._uploadKeyFile = undefined;
+  }
+
+  private async _uploadCertificate(): Promise<void> {
+    if (!this._uploadCertificateFile || !this._uploadKeyFile) {
+      this._error = this.hass.localize(
+        "ui.panel.config.network.http.certificate.upload_missing"
+      );
+      return;
+    }
+    await this._runCertificateAction(async () => {
+      const [certificate, key] = await Promise.all([
+        this._uploadCertificateFile!.text(),
+        this._uploadKeyFile!.text(),
+      ]);
+      const info = await uploadHttpCertificate(this.hass, certificate, key);
+      this._setCertificateInfo("uploaded", info);
+      this._certificateMessage = this.hass.localize(
+        "ui.panel.config.network.http.certificate.upload_success"
+      );
+    });
+  }
+
+  private async _generateCertificate(): Promise<void> {
+    if (this._certificates?.generated) {
+      const confirmed = await showConfirmationDialog(this, {
+        title: this.hass.localize(
+          "ui.panel.config.network.http.certificate.regenerate_confirm.title"
+        ),
+        text: this.hass.localize(
+          "ui.panel.config.network.http.certificate.regenerate_confirm.text"
+        ),
+        confirmText: this.hass.localize(
+          "ui.panel.config.network.http.certificate.regenerate"
+        ),
+      });
+      if (!confirmed) {
+        return;
+      }
+    }
+    await this._runCertificateAction(async () => {
+      const info = await generateHttpCertificate(this.hass);
+      this._setCertificateInfo("generated", info);
+      this._certificateMessage = this.hass.localize(
+        "ui.panel.config.network.http.certificate.generate_success"
+      );
+    });
+  }
+
+  private async _downloadCa(): Promise<void> {
+    await this._runCertificateAction(async () => {
+      const { certificate } = await fetchHttpCaCertificate(this.hass);
+      const url = URL.createObjectURL(
+        new Blob([certificate], { type: "application/x-pem-file" })
+      );
+      fileDownload(url, "home-assistant-ca.pem");
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  private _setCertificateInfo(
+    source: "uploaded" | "generated",
+    info: CertificateInfo
+  ) {
+    this._certificates = {
+      uploaded: null,
+      generated: null,
+      ...this._certificates,
+      [source]: info,
+    };
+  }
+
+  private async _runCertificateAction(action: () => Promise<void>) {
+    this._certificateBusy = true;
+    this._certificateMessage = undefined;
+    this._error = undefined;
+    try {
+      await action();
+    } catch (err: any) {
+      this._error =
+        err?.message ||
+        this.hass.localize("ui.panel.config.network.http.certificate.error");
+    } finally {
+      this._certificateBusy = false;
+    }
+  }
+
   private async _fetchConfig(): Promise<void> {
     try {
       const {
@@ -379,11 +688,15 @@ class HaConfigHttpForm extends LitElement {
         pending,
         active_config_type,
         default: defaultConfig,
+        proxy,
+        certificates,
       } = await fetchHttpConfig(this.hass);
       this._stable = stable;
       this._config = { ...stable };
       this._activeConfigType = active_config_type;
       this._default = defaultConfig;
+      this._proxy = proxy;
+      this._certificates = certificates;
       // An active trial pending (no error) is handled by the global
       // confirm/revert dialog. A pending carrying an error was reverted or
       // failed to apply and is kept only so we can surface it here.
@@ -398,6 +711,7 @@ class HaConfigHttpForm extends LitElement {
       config.login_attempts_threshold === UNLIMITED_LOGIN_ATTEMPTS;
     return {
       ...config,
+      certificate_mode: certificateModeOf(config),
       login_attempts_unlimited: unlimited,
       login_attempts_threshold: unlimited
         ? undefined
@@ -438,6 +752,12 @@ class HaConfigHttpForm extends LitElement {
         { port: this._default?.server_port ?? 8123 }
       );
     }
+    if (schema.name === "https_port") {
+      return this.hass.localize(
+        "ui.panel.config.network.http.helpers.https_port",
+        { port: this._default?.https_port ?? 443 }
+      );
+    }
     return (
       this.hass.localize(
         `ui.panel.config.network.http.helpers.${schema.name}` as any
@@ -446,9 +766,25 @@ class HaConfigHttpForm extends LitElement {
   };
 
   private _valueChanged(ev: CustomEvent): void {
-    const { login_attempts_unlimited: unlimited, ...value } = ev.detail
-      .value as ReturnType<HaConfigHttpForm["_formData"]>;
+    const {
+      login_attempts_unlimited: unlimited,
+      certificate_mode: mode,
+      ...value
+    } = ev.detail.value as ReturnType<HaConfigHttpForm["_formData"]>;
     const config: HttpConfig = value;
+    if (mode === "none") {
+      delete config.certificate;
+      delete config.ssl_certificate;
+      delete config.ssl_key;
+      delete config.ssl_peer_certificate;
+    } else {
+      config.certificate = mode;
+      if (mode !== "files") {
+        delete config.ssl_certificate;
+        delete config.ssl_key;
+        delete config.ssl_peer_certificate;
+      }
+    }
     const previous = this._config?.login_attempts_threshold;
     if (unlimited) {
       if (previous !== undefined && previous !== UNLIMITED_LOGIN_ATTEMPTS) {
@@ -480,8 +816,11 @@ class HaConfigHttpForm extends LitElement {
     if (loc.hostname.endsWith("nabu.casa")) {
       return undefined;
     }
-    const oldHttps = !!this._stable.ssl_certificate;
-    const newHttps = !!this._config.ssl_certificate;
+    // Behind the proxy plugin HTTPS is served next to HTTP, so the address
+    // of this page only changes with the HTTP port.
+    const proxied = !!this._proxy?.active;
+    const oldHttps = !proxied && certificateModeOf(this._stable) !== "none";
+    const newHttps = !proxied && certificateModeOf(this._config) !== "none";
     const oldPort = this._stable.server_port ?? (oldHttps ? 443 : 80);
     const newPort = this._config.server_port ?? (newHttps ? 443 : 80);
     // The reachable address only changes when the scheme or the port changes.
@@ -649,6 +988,17 @@ class HaConfigHttpForm extends LitElement {
           display: flex;
           gap: var(--ha-space-2);
           justify-content: flex-end;
+        }
+        .certificate {
+          margin-top: var(--ha-space-4);
+        }
+        .certificate ha-file-upload {
+          display: block;
+          margin-bottom: var(--ha-space-2);
+        }
+        .certificate-actions {
+          display: flex;
+          gap: var(--ha-space-2);
         }
       `,
     ];

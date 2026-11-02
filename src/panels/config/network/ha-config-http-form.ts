@@ -1,7 +1,13 @@
 import { ERR_CONNECTION_LOST } from "home-assistant-js-websocket";
 import type { CSSResultGroup, PropertyValues } from "lit";
 import { css, html, LitElement, nothing } from "lit";
-import { customElement, property, query, state } from "lit/decorators";
+import {
+  customElement,
+  property,
+  query,
+  queryAll,
+  state,
+} from "lit/decorators";
 import memoizeOne from "memoize-one";
 import { mainWindow } from "../../../common/dom/get_main_window";
 import { HOSTNAME_PATTERN } from "../../../common/string/is_hostname";
@@ -14,6 +20,7 @@ import type { HASSDomEvent } from "../../../common/dom/fire_event";
 import "../../../components/ha-alert";
 import "../../../components/ha-button";
 import "../../../components/ha-card";
+import "../../../components/ha-expansion-panel";
 import "../../../components/ha-file-upload";
 import "../../../components/ha-form/ha-form";
 import type { HaForm } from "../../../components/ha-form/ha-form";
@@ -58,13 +65,8 @@ const certificateModeOf = (config: HttpConfig): CertificateMode => {
   return config.ssl_certificate ? "files" : "none";
 };
 
-const SCHEMA = memoizeOne(
-  (
-    localize: LocalizeFunc,
-    unlimitedLoginAttempts: boolean,
-    proxyAvailable: boolean,
-    certificateMode: CertificateMode
-  ) =>
+const PORT_SCHEMA = memoizeOne(
+  (localize: LocalizeFunc) =>
     [
       {
         name: "server_port",
@@ -80,84 +82,100 @@ const SCHEMA = memoizeOne(
           },
         },
       },
+    ] as const
+);
+
+const CERTIFICATE_SCHEMA = memoizeOne(
+  (localize: LocalizeFunc) =>
+    [
       {
-        name: "ssl",
-        type: "expandable",
-        flatten: true,
-        title: localize("ui.panel.config.network.http.sections.ssl"),
-        schema: [
-          {
-            name: "certificate_mode",
-            required: true,
-            selector: {
-              select: {
-                mode: "dropdown",
-                options: (
-                  ["none", "files", "uploaded", "generated"] as const
-                ).map((mode) => ({
-                  value: mode,
-                  label: localize(
-                    `ui.panel.config.network.http.certificate_mode.${mode}`
-                  ),
-                })),
-              },
-            },
+        name: "certificate_mode",
+        required: true,
+        selector: {
+          select: {
+            mode: "dropdown",
+            options: (["none", "files", "uploaded", "generated"] as const).map(
+              (mode) => ({
+                value: mode,
+                label: localize(
+                  `ui.panel.config.network.http.certificate_mode.${mode}`
+                ),
+              })
+            ),
           },
-          ...(proxyAvailable && certificateMode !== "none"
-            ? ([
-                {
-                  name: "https_port",
-                  required: true,
-                  selector: {
-                    number: {
-                      min: 1,
-                      max: 65535,
-                      mode: "box",
-                      validation_message: localize(
-                        "ui.panel.config.network.http.invalid_port"
-                      ),
-                    },
-                  },
-                },
-              ] as const)
-            : []),
-          ...(certificateMode === "files"
-            ? ([
-                {
-                  name: "ssl_certificate",
-                  required: true,
-                  selector: { text: {} },
-                },
-                {
-                  name: "ssl_key",
-                  selector: { text: {} },
-                },
-                {
-                  name: "ssl_peer_certificate",
-                  selector: { text: {} },
-                },
-              ] as const)
-            : []),
-          {
-            name: "ssl_profile",
-            selector: {
-              select: {
-                mode: "box",
-                box_max_columns: 1,
-                options: SSL_PROFILES.map((profile) => ({
-                  value: profile,
-                  label: localize(
-                    `ui.panel.config.network.http.ssl_profile_${profile}`
-                  ),
-                  description: localize(
-                    `ui.panel.config.network.http.ssl_profile_${profile}_description`
-                  ),
-                })),
-              },
-            },
-          },
-        ],
+        },
       },
+    ] as const
+);
+
+// The rest of the SSL section; rendered below the certificate details so the
+// profile comes last.
+const SSL_SCHEMA = memoizeOne(
+  (
+    localize: LocalizeFunc,
+    proxyAvailable: boolean,
+    certificateMode: CertificateMode
+  ) =>
+    [
+      ...(proxyAvailable && certificateMode !== "none"
+        ? ([
+            {
+              name: "https_port",
+              required: true,
+              selector: {
+                number: {
+                  min: 1,
+                  max: 65535,
+                  mode: "box",
+                  validation_message: localize(
+                    "ui.panel.config.network.http.invalid_port"
+                  ),
+                },
+              },
+            },
+          ] as const)
+        : []),
+      ...(certificateMode === "files"
+        ? ([
+            {
+              name: "ssl_certificate",
+              required: true,
+              selector: { text: {} },
+            },
+            {
+              name: "ssl_key",
+              selector: { text: {} },
+            },
+            {
+              name: "ssl_peer_certificate",
+              selector: { text: {} },
+            },
+          ] as const)
+        : []),
+      {
+        name: "ssl_profile",
+        selector: {
+          select: {
+            mode: "box",
+            box_max_columns: 1,
+            options: SSL_PROFILES.map((profile) => ({
+              value: profile,
+              label: localize(
+                `ui.panel.config.network.http.ssl_profile_${profile}`
+              ),
+              description: localize(
+                `ui.panel.config.network.http.ssl_profile_${profile}_description`
+              ),
+            })),
+          },
+        },
+      },
+    ] as const
+);
+
+const SECTIONS_SCHEMA = memoizeOne(
+  (localize: LocalizeFunc, unlimitedLoginAttempts: boolean) =>
+    [
       {
         name: "reverse_proxy",
         type: "expandable",
@@ -247,6 +265,13 @@ const SCHEMA = memoizeOne(
     ] as const
 );
 
+type FormSchema = SchemaUnion<
+  | ReturnType<typeof PORT_SCHEMA>
+  | ReturnType<typeof CERTIFICATE_SCHEMA>
+  | ReturnType<typeof SSL_SCHEMA>
+  | ReturnType<typeof SECTIONS_SCHEMA>
+>;
+
 @customElement("ha-config-http-form")
 class HaConfigHttpForm extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
@@ -287,7 +312,7 @@ class HaConfigHttpForm extends LitElement {
   // Last explicit threshold, restored when the unlimited toggle is turned off.
   private _lastLoginAttemptsThreshold?: number;
 
-  @query("ha-form") private _form?: HaForm;
+  @queryAll("ha-form") private _forms!: NodeListOf<HaForm>;
 
   @query("ha-alert") private _firstAlert?: HTMLElement;
 
@@ -315,12 +340,6 @@ class HaConfigHttpForm extends LitElement {
 
     const formData = this._config ? this._formData(this._config) : undefined;
     const certificateMode = formData?.certificate_mode ?? "none";
-    const schema = SCHEMA(
-      this.hass.localize,
-      !!formData?.login_attempts_unlimited,
-      !!this._proxy?.available,
-      certificateMode
-    );
 
     const portChanged =
       !!this._stable && this._config?.server_port !== this._stable.server_port;
@@ -434,17 +453,36 @@ class HaConfigHttpForm extends LitElement {
           ${
             formData
               ? html`
-                  <ha-form
-                    .hass=${this.hass}
-                    .data=${formData}
-                    .schema=${schema}
-                    .error=${this._fieldErrors}
-                    .disabled=${this._saving}
-                    .computeLabel=${this._computeLabel}
-                    .computeHelper=${this._computeHelper}
-                    @value-changed=${this._valueChanged}
-                  ></ha-form>
-                  ${this._renderCertificate(certificateMode)}
+                  ${this._renderForm(formData, PORT_SCHEMA(this.hass.localize))}
+                  <ha-expansion-panel outlined>
+                    <div slot="header" role="heading" aria-level="3">
+                      ${this.hass.localize(
+                        "ui.panel.config.network.http.sections.ssl"
+                      )}
+                    </div>
+                    <div class="content">
+                      ${this._renderForm(
+                        formData,
+                        CERTIFICATE_SCHEMA(this.hass.localize)
+                      )}
+                      ${this._renderCertificate(certificateMode)}
+                      ${this._renderForm(
+                        formData,
+                        SSL_SCHEMA(
+                          this.hass.localize,
+                          !!this._proxy?.available,
+                          certificateMode
+                        )
+                      )}
+                    </div>
+                  </ha-expansion-panel>
+                  ${this._renderForm(
+                    formData,
+                    SECTIONS_SCHEMA(
+                      this.hass.localize,
+                      !!formData?.login_attempts_unlimited
+                    )
+                  )}
                 `
               : nothing
           }
@@ -465,6 +503,26 @@ class HaConfigHttpForm extends LitElement {
             : nothing
         }
       </ha-card>
+    `;
+  }
+
+  // The form data is shared by every sub-form, so each change event carries
+  // the complete config regardless of which form raised it.
+  private _renderForm(
+    data: ReturnType<HaConfigHttpForm["_formData"]>,
+    schema: readonly FormSchema[]
+  ) {
+    return html`
+      <ha-form
+        .hass=${this.hass}
+        .data=${data}
+        .schema=${schema}
+        .error=${this._fieldErrors}
+        .disabled=${this._saving}
+        .computeLabel=${this._computeLabel}
+        .computeHelper=${this._computeHelper}
+        @value-changed=${this._valueChanged}
+      ></ha-form>
     `;
   }
 
@@ -728,9 +786,7 @@ class HaConfigHttpForm extends LitElement {
     this._revertedPending = undefined;
   }
 
-  private _computeLabel = (
-    schema: SchemaUnion<ReturnType<typeof SCHEMA>>
-  ): string => {
+  private _computeLabel = (schema: FormSchema): string => {
     if ("type" in schema && schema.type === "expandable") {
       // Expandable sections render their own title; never label them.
       return "";
@@ -740,9 +796,7 @@ class HaConfigHttpForm extends LitElement {
     );
   };
 
-  private _computeHelper = (
-    schema: SchemaUnion<ReturnType<typeof SCHEMA>>
-  ): string => {
+  private _computeHelper = (schema: FormSchema): string => {
     if ("type" in schema && schema.type === "expandable") {
       return "";
     }
@@ -866,7 +920,7 @@ class HaConfigHttpForm extends LitElement {
     if (!this._config || !this._stable) {
       return;
     }
-    if (this._form && !this._form.reportValidity()) {
+    if (Array.from(this._forms).some((form) => !form.reportValidity())) {
       return;
     }
 
@@ -935,12 +989,15 @@ class HaConfigHttpForm extends LitElement {
       this._saving = false;
     }
     await this.updateComplete;
-    await this._form?.updateComplete;
+    const forms = Array.from(this._forms);
+    await Promise.all(forms.map((form) => form.updateComplete));
     // Inline field errors render inside ha-form's shadow root, so fall back to
     // it when no top-level alert is present.
     const target =
       this._firstAlert ??
-      this._form?.shadowRoot?.querySelector<HTMLElement>("ha-alert");
+      forms
+        .map((form) => form.shadowRoot?.querySelector<HTMLElement>("ha-alert"))
+        .find(Boolean);
     target?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
@@ -989,8 +1046,24 @@ class HaConfigHttpForm extends LitElement {
           gap: var(--ha-space-2);
           justify-content: flex-end;
         }
+        ha-form {
+          display: block;
+        }
+        ha-form:not(:last-child) {
+          margin-bottom: 24px;
+        }
+        ha-expansion-panel {
+          display: block;
+          margin-bottom: 24px;
+          --expansion-panel-content-padding: 0;
+          border-radius: var(--ha-border-radius-md);
+          --ha-card-border-radius: var(--ha-border-radius-md);
+        }
+        .content {
+          padding: 12px;
+        }
         .certificate {
-          margin-top: var(--ha-space-4);
+          margin-bottom: 24px;
         }
         .certificate ha-file-upload {
           display: block;

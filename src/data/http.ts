@@ -53,6 +53,13 @@ export interface CertificateInfo {
   subject_alt_names: string[];
 }
 
+export type CertificateActionStatus =
+  "applied" | "restart_required" | "not_selected";
+
+export interface CertificateActionResult extends CertificateInfo {
+  status: CertificateActionStatus;
+}
+
 export interface HttpProxyState {
   // Supervisor runs its proxy plugin and handed Core the sockets
   available: boolean;
@@ -132,7 +139,7 @@ export const uploadHttpCertificate = (
   certificate: string,
   key: string
 ) =>
-  hass.callWS<CertificateInfo>({
+  hass.callWS<CertificateActionResult>({
     type: "http/certificate/upload",
     certificate,
     key,
@@ -142,7 +149,7 @@ export const generateHttpCertificate = (
   hass: HomeAssistant,
   subjects?: string[]
 ) =>
-  hass.callWS<CertificateInfo>({
+  hass.callWS<CertificateActionResult>({
     type: "http/certificate/generate",
     ...(subjects ? { subjects } : {}),
   });

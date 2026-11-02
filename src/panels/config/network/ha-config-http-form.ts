@@ -612,7 +612,7 @@ class HaConfigHttpForm extends LitElement {
       const info = await uploadHttpCertificate(this.hass, certificate, key);
       this._setCertificateInfo("uploaded", info);
       this._certificateMessage = this.hass.localize(
-        "ui.panel.config.network.http.certificate.upload_success"
+        `ui.panel.config.network.http.certificate.upload_success.${info.status}`
       );
     });
   }
@@ -638,7 +638,7 @@ class HaConfigHttpForm extends LitElement {
       const info = await generateHttpCertificate(this.hass);
       this._setCertificateInfo("generated", info);
       this._certificateMessage = this.hass.localize(
-        "ui.panel.config.network.http.certificate.generate_success"
+        `ui.panel.config.network.http.certificate.generate_success.${info.status}`
       );
     });
   }

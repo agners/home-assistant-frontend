@@ -9702,10 +9702,18 @@
               "upload_key": "Private key (PEM)",
               "upload": "Upload",
               "upload_missing": "Select both a certificate and a private key file.",
-              "upload_success": "The certificate was uploaded. Save the configuration to use it.",
+              "upload_success": {
+                "applied": "The certificate was uploaded and is now in use.",
+                "restart_required": "The certificate was uploaded. Restart Home Assistant to use it.",
+                "not_selected": "The certificate was uploaded. Select it and save the configuration to use it."
+              },
               "generate": "Generate certificate",
               "regenerate": "Regenerate certificate",
-              "generate_success": "A certificate was generated. Save the configuration to use it.",
+              "generate_success": {
+                "applied": "A certificate was generated and is now in use.",
+                "restart_required": "A certificate was generated. Restart Home Assistant to use it.",
+                "not_selected": "A certificate was generated. Select it and save the configuration to use it."
+              },
               "regenerate_confirm": {
                 "title": "Regenerate certificate?",
                 "text": "A new certificate is issued by the existing certificate authority, so devices that already trust it keep working."

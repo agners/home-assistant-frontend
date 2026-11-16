@@ -70,7 +70,35 @@ export interface HttpProxyState {
 export interface HttpCertificates {
   uploaded: CertificateInfo | null;
   generated: CertificateInfo | null;
+  // A publicly trusted certificate for a name under a shared zone; only
+  // served by the proxy plugin next to the selected certificate.
+  public?: CertificateInfo | null;
 }
+
+export interface PublicCertificateSettings {
+  zone: string;
+  api_url: string;
+  directory_url: string;
+}
+
+// Whether the resolver on this network returns the instance's address for
+// its public name; routers with DNS rebinding protection filter it.
+export type PublicCertificateProbe = "ok" | "filtered" | "unknown";
+
+export interface PublicCertificateStatus {
+  enabled: boolean;
+  settings: PublicCertificateSettings;
+  instance_id: string | null;
+  certificate: CertificateInfo | null;
+  url: string | null;
+  probe: PublicCertificateProbe | null;
+  last_error: string | null;
+}
+
+export const LETSENCRYPT_STAGING =
+  "https://acme-staging-v02.api.letsencrypt.org/directory";
+export const LETSENCRYPT_PRODUCTION =
+  "https://acme-v02.api.letsencrypt.org/directory";
 
 export interface HttpConfigState {
   stable: HttpConfigWithMeta;
@@ -161,3 +189,20 @@ export const deleteHttpCertificate = (
 
 export const fetchHttpCaCertificate = (hass: HomeAssistant) =>
   hass.callWS<{ certificate: string }>({ type: "http/certificate/ca" });
+
+export const fetchPublicCertificateStatus = (hass: HomeAssistant) =>
+  hass.callWS<PublicCertificateStatus>({
+    type: "http/public_certificate/status",
+  });
+
+export const enablePublicCertificate = (
+  hass: HomeAssistant,
+  settings: Partial<PublicCertificateSettings>
+) =>
+  hass.callWS<PublicCertificateStatus>({
+    type: "http/public_certificate/enable",
+    ...settings,
+  });
+
+export const disablePublicCertificate = (hass: HomeAssistant) =>
+  hass.callWS<undefined>({ type: "http/public_certificate/disable" });

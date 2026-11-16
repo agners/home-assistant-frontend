@@ -23,13 +23,20 @@ import "../../../components/ha-card";
 import "../../../components/ha-expansion-panel";
 import "../../../components/ha-file-upload";
 import "../../../components/ha-form/ha-form";
+import "../../../components/ha-settings-row";
+import "../../../components/ha-switch";
 import type { HaForm } from "../../../components/ha-form/ha-form";
 import type { SchemaUnion } from "../../../components/ha-form/types";
 import {
+  disablePublicCertificate,
+  enablePublicCertificate,
   fetchHttpCaCertificate,
   fetchHttpConfig,
+  fetchPublicCertificateStatus,
   generateHttpCertificate,
   HTTP_CONFIG_FIELDS,
+  LETSENCRYPT_PRODUCTION,
+  LETSENCRYPT_STAGING,
   saveHttpConfig,
   SSL_PROFILES,
   uploadHttpCertificate,
@@ -41,6 +48,7 @@ import type {
   HttpConfig,
   HttpConfigWithMeta,
   HttpProxyState,
+  PublicCertificateStatus,
 } from "../../../data/http";
 import {
   showAlertDialog,
@@ -305,6 +313,14 @@ class HaConfigHttpForm extends LitElement {
 
   @state() private _certificateMessage?: string;
 
+  @state() private _publicCertificate?: PublicCertificateStatus;
+
+  @state() private _publicBusy = false;
+
+  @state() private _publicMessage?: string;
+
+  @state() private _publicStaging = true;
+
   private _uploadCertificateFile?: File;
 
   private _uploadKeyFile?: File;
@@ -474,6 +490,7 @@ class HaConfigHttpForm extends LitElement {
                           certificateMode
                         )
                       )}
+                      ${this._renderPublicCertificate()}
                     </div>
                   </ha-expansion-panel>
                   ${this._renderForm(
@@ -639,6 +656,234 @@ class HaConfigHttpForm extends LitElement {
     `;
   }
 
+  // Only the proxy plugin serves a second certificate, so the section is
+  // offered only where it can take effect.
+  private _renderPublicCertificate() {
+    if (!this._proxy?.available || !this._publicCertificate) {
+      return nothing;
+    }
+    const status = this._publicCertificate;
+    const info = status.certificate;
+    const zone = status.settings.zone;
+    return html`
+      <div class="public-certificate">
+        <h4>
+          ${this.hass.localize(
+            "ui.panel.config.network.http.public_certificate.title"
+          )}
+        </h4>
+        <p class="description">
+          ${this.hass.localize(
+            "ui.panel.config.network.http.public_certificate.description"
+          )}
+        </p>
+        ${
+          this._publicMessage
+            ? html`<ha-alert alert-type="success"
+                >${this._publicMessage}</ha-alert
+              >`
+            : nothing
+        }
+        ${
+          status.last_error
+            ? html`<ha-alert alert-type="error">
+                ${this.hass.localize(
+                  "ui.panel.config.network.http.public_certificate.last_error",
+                  { error: status.last_error }
+                )}
+              </ha-alert>`
+            : nothing
+        }
+        ${
+          this._publicBusy
+            ? html`<ha-alert alert-type="info">
+                ${this.hass.localize(
+                  "ui.panel.config.network.http.public_certificate.busy"
+                )}
+              </ha-alert>`
+            : nothing
+        }
+        ${
+          status.enabled
+            ? html`
+                <p>
+                  ${
+                    info
+                      ? this.hass.localize(
+                          "ui.panel.config.network.http.public_certificate.info",
+                          {
+                            issuer: info.issuer,
+                            expires: new Date(
+                              info.not_valid_after
+                            ).toLocaleDateString(this.hass.locale.language),
+                          }
+                        )
+                      : this.hass.localize(
+                          "ui.panel.config.network.http.public_certificate.pending"
+                        )
+                  }
+                </p>
+                ${
+                  status.url
+                    ? html`
+                        <p>
+                          ${this.hass.localize(
+                            "ui.panel.config.network.http.public_certificate.url"
+                          )}
+                          <a
+                            href=${status.url}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            >${status.url}</a
+                          >
+                        </p>
+                      `
+                    : nothing
+                }
+                ${
+                  status.probe
+                    ? html`
+                        <ha-alert
+                          alert-type=${
+                            status.probe === "ok"
+                              ? "success"
+                              : status.probe === "filtered"
+                                ? "warning"
+                                : "info"
+                          }
+                        >
+                          ${this.hass.localize(
+                            `ui.panel.config.network.http.public_certificate.probe_${status.probe}`,
+                            { zone }
+                          )}
+                        </ha-alert>
+                      `
+                    : nothing
+                }
+              `
+            : html`
+                <ha-alert alert-type="info">
+                  ${this.hass.localize(
+                    "ui.panel.config.network.http.public_certificate.privacy",
+                    { zone }
+                  )}
+                </ha-alert>
+              `
+        }
+        <ha-settings-row>
+          <span slot="heading">
+            ${this.hass.localize(
+              "ui.panel.config.network.http.public_certificate.staging"
+            )}
+          </span>
+          <span slot="description">
+            ${this.hass.localize(
+              "ui.panel.config.network.http.public_certificate.staging_description"
+            )}
+          </span>
+          <ha-switch
+            .checked=${this._publicStaging}
+            .disabled=${this._publicBusy}
+            @change=${this._publicStagingChanged}
+          ></ha-switch>
+        </ha-settings-row>
+        <div class="certificate-actions">
+          <ha-button
+            @click=${this._getPublicCertificate}
+            .disabled=${this._publicBusy}
+            .loading=${this._publicBusy}
+          >
+            ${this.hass.localize(
+              status.enabled
+                ? "ui.panel.config.network.http.public_certificate.renew"
+                : "ui.panel.config.network.http.public_certificate.get"
+            )}
+          </ha-button>
+          ${
+            status.enabled
+              ? html`
+                  <ha-button
+                    appearance="plain"
+                    variant="danger"
+                    @click=${this._removePublicCertificate}
+                    .disabled=${this._publicBusy}
+                  >
+                    ${this.hass.localize(
+                      "ui.panel.config.network.http.public_certificate.remove"
+                    )}
+                  </ha-button>
+                `
+              : nothing
+          }
+        </div>
+      </div>
+    `;
+  }
+
+  private _publicStagingChanged(ev: Event) {
+    this._publicStaging = (ev.target as HTMLInputElement).checked;
+  }
+
+  private async _getPublicCertificate(): Promise<void> {
+    await this._runPublicAction(async () => {
+      this._publicCertificate = await enablePublicCertificate(this.hass, {
+        directory_url: this._publicStaging
+          ? LETSENCRYPT_STAGING
+          : LETSENCRYPT_PRODUCTION,
+      });
+      this._publicMessage = this.hass.localize(
+        "ui.panel.config.network.http.public_certificate.success"
+      );
+    });
+  }
+
+  private async _removePublicCertificate(): Promise<void> {
+    const confirmed = await showConfirmationDialog(this, {
+      title: this.hass.localize(
+        "ui.panel.config.network.http.public_certificate.remove_confirm.title"
+      ),
+      text: this.hass.localize(
+        "ui.panel.config.network.http.public_certificate.remove_confirm.text"
+      ),
+      confirmText: this.hass.localize(
+        "ui.panel.config.network.http.public_certificate.remove"
+      ),
+      destructive: true,
+    });
+    if (!confirmed) {
+      return;
+    }
+    await this._runPublicAction(async () => {
+      await disablePublicCertificate(this.hass);
+      this._publicCertificate = await fetchPublicCertificateStatus(this.hass);
+      this._publicMessage = this.hass.localize(
+        "ui.panel.config.network.http.public_certificate.removed"
+      );
+    });
+  }
+
+  private async _runPublicAction(action: () => Promise<void>) {
+    this._publicBusy = true;
+    this._publicMessage = undefined;
+    this._error = undefined;
+    try {
+      await action();
+    } catch (err: any) {
+      // The status carries the reason too, but the proxy reload that follows
+      // a new certificate may drop this connection before the reply arrives.
+      this._error =
+        err?.message ||
+        this.hass.localize("ui.panel.config.network.http.certificate.error");
+      try {
+        this._publicCertificate = await fetchPublicCertificateStatus(this.hass);
+      } catch (_err: any) {
+        // keep the previous status
+      }
+    } finally {
+      this._publicBusy = false;
+    }
+  }
+
   private _certificateFilePicked(ev: HASSDomEvent<{ files: File[] }>) {
     this._uploadCertificateFile = ev.detail.files[0];
   }
@@ -755,12 +1000,26 @@ class HaConfigHttpForm extends LitElement {
       this._default = defaultConfig;
       this._proxy = proxy;
       this._certificates = certificates;
+      if (proxy?.available) {
+        this._fetchPublicCertificate();
+      }
       // An active trial pending (no error) is handled by the global
       // confirm/revert dialog. A pending carrying an error was reverted or
       // failed to apply and is kept only so we can surface it here.
       this._revertedPending = pending?.error ? pending : undefined;
     } catch (err: any) {
       this._error = err.message;
+    }
+  }
+
+  private async _fetchPublicCertificate(): Promise<void> {
+    try {
+      this._publicCertificate = await fetchPublicCertificateStatus(this.hass);
+      this._publicStaging =
+        this._publicCertificate.settings.directory_url !==
+        LETSENCRYPT_PRODUCTION;
+    } catch (_err: any) {
+      // Older cores have no public certificate support; keep the section hidden
     }
   }
 
@@ -1072,6 +1331,16 @@ class HaConfigHttpForm extends LitElement {
         .certificate-actions {
           display: flex;
           gap: var(--ha-space-2);
+        }
+        .public-certificate {
+          margin-top: 24px;
+        }
+        .public-certificate h4 {
+          margin: 0 0 var(--ha-space-2);
+        }
+        .public-certificate ha-settings-row {
+          padding: 0;
+          margin-bottom: var(--ha-space-2);
         }
       `,
     ];

@@ -9721,6 +9721,30 @@
               "download_ca": "Download CA certificate",
               "error": "The certificate action failed."
             },
+            "public_certificate": {
+              "title": "Trusted certificate for your local network",
+              "description": "Home Assistant gets a certificate from a public certificate authority for a name that points at its local IP address, so browsers and apps trust the connection without installing anything. It is served next to the certificate selected above, which stays in use for the IP address and homeassistant.local.",
+              "privacy": "Getting the certificate publishes an identifier of this instance in the public certificate logs, and looking up the name tells the operator of {zone} the identifier and the local IP address.",
+              "staging": "Test certificate",
+              "staging_description": "Use the certificate authority's test environment. The certificate is not trusted by browsers. Turn this off for a trusted certificate.",
+              "get": "Get certificate",
+              "renew": "Renew now",
+              "remove": "Remove",
+              "busy": "Requesting the certificate, this takes a few seconds...",
+              "info": "Certificate from {issuer}, valid until {expires}.",
+              "url": "Reach Home Assistant at",
+              "probe_ok": "The name resolves on this network.",
+              "probe_filtered": "Your router blocks the name: it refuses public names that point at a local address (DNS rebinding protection). Add an exception for {zone} in the router to use it.",
+              "probe_unknown": "Could not check whether the name resolves on this network. Home Assistant may be offline.",
+              "pending": "No certificate yet. Home Assistant retries on its own.",
+              "last_error": "The last attempt failed: {error}",
+              "remove_confirm": {
+                "title": "Remove the trusted certificate?",
+                "text": "Home Assistant stops serving the certificate. The same name comes back when you get a certificate again."
+              },
+              "removed": "The certificate was removed.",
+              "success": "The certificate is in use."
+            },
             "proxy": {
               "active": "Home Assistant is served through the Supervisor proxy plugin, which adds HTTPS next to HTTP and supports HTTP/2 and HTTP/3.",
               "unavailable": "The Supervisor proxy plugin could not be reached, so Home Assistant is serving directly on its port."
